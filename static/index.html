@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <link rel="stylesheet" href="/static/style.css" />
+        <title>SYSTEM_LOG_ALPHA</title>
+    </head>
+    <body>
+        <header>
+            <div>ORDER_STREAM</div>
+            <div id="status" class="status-dot"></div>
+        </header>
+
+        <form id="order-form">
+            <input
+                type="text"
+                id="instrument"
+                placeholder="INSTRUMENT"
+                required
+            />
+            <input type="number" id="quantity" placeholder="QTY" required />
+            <input
+                type="number"
+                id="price"
+                placeholder="PRICE"
+                step="0.01"
+                required
+            />
+            <button type="submit">EXECUTE</button>
+        </form>
+
+        <div id="order-feed"></div>
+
+        <script src="/static/app.js"></script>
+    </body>
+</html>
