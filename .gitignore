@@ -1,0 +1,10 @@
+# binaries
+trading-platform
+
+# env files
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db

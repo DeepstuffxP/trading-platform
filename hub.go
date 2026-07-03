@@ -20,6 +20,7 @@ func (h *Hub) addClient(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.clients[conn] = true
+	activeConnections.Inc()
 	log.Println("client connected, total:", len(h.clients))
 }
 
@@ -27,6 +28,7 @@ func (h *Hub) removeClient(conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.clients, conn)
+	activeConnections.Dec()
 	log.Println("client disconnected, total: ", len(h.clients))
 }
 

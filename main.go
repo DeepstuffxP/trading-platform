@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var upgrader = websocket.Upgrader{
@@ -54,6 +55,8 @@ func main() {
 		c.File("./static/index.html")
 	})
 
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
 	// websocket endpoint
 	r.GET("/ws", func(c *gin.Context) {
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -87,9 +90,11 @@ func main() {
 		msg := fmt.Sprintf("[%s] %s | QTY: %d | PRICE: ₹%.2f", uniqueID, order.Instrument, order.Quantity, order.Price)
 
 		if err := nc.Publish("orders.new", []byte(msg)); err != nil {
+			orderPublishFailures.Inc()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to publish"})
 			return
 		}
+		ordersPlaced.Inc()
 
 		log.Printf("order published: %s", uniqueID)
 		c.JSON(http.StatusOK, gin.H{"status": "order placed", "order_id": uniqueID})
