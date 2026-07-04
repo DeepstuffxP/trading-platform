@@ -1,30 +1,37 @@
 # Trading Platform
 
-A real-time order distribution system built in Go. Orders placed via a REST API are published to a NATS message bus and instantly broadcast to all connected browser clients over WebSockets. Service metrics are instrumented with Prometheus and visualized in Grafana. The entire stack runs with a single `docker-compose up` command.
+A real-time order distribution system built in Go. Orders placed via a REST API are published to a NATS JetStream message bus, persisted to Postgres, cached in Redis, and instantly broadcast to all connected browser clients over WebSockets. Service metrics are instrumented with Prometheus and visualized in Grafana. The entire stack runs with a single `docker compose up` command.
 
 ## Architecture
 
 ```
-Browser → POST /orders → Gin API → NATS (orders.new) → WebSocket Hub → All connected clients
-                                                      ↑
-                                          Prometheus scrapes /metrics
-                                                      ↑
-                                          Grafana reads Prometheus
+Browser → POST /orders → Gin API → JetStream (orders.new) → Durable Consumer → WebSocket Hub → All connected clients
+                              ↓                                                        ↑
+                           Postgres                                             Redis (late-joiner cache)
+                         (order history)
+                              ↑
+              Prometheus scrapes /metrics → Grafana
 ```
 
 When an order is placed:
+
 1. The Gin REST API validates the request and generates a unique order ID
-2. The order event is published to NATS on the `orders.new` subject
-3. The WebSocket Hub, subscribed to `orders.new`, receives the event and broadcasts it to every connected browser tab simultaneously
-4. Prometheus scrapes `/metrics` every 15 seconds — tracking total orders, active WebSocket connections, and publish failures
-5. Grafana reads from Prometheus and displays live dashboards
+2. The order event is published to NATS JetStream on the `orders.new` subject — persisted to disk, guaranteed delivery
+3. The latest price for that instrument is written to Redis
+4. The order is saved to Postgres
+5. The durable JetStream consumer receives the event and the WebSocket Hub broadcasts it to every connected browser tab simultaneously
+6. When a new client connects via WebSocket, Redis immediately sends them the last known price for every instrument — no waiting for the next order
+
+If the app crashes before the consumer acknowledges a message, JetStream automatically redelivers it on restart — no orders are lost.
 
 ## Stack
 
 - **Go** — application runtime
 - **Gin** — HTTP router and REST API
-- **NATS** — message bus (pub/sub, decouples order intake from delivery)
+- **NATS JetStream** — persistent message bus with durable consumers and guaranteed delivery
 - **gorilla/websocket** — WebSocket server for live browser connections
+- **Redis** — latest price cache for late-joining clients
+- **Postgres** — order history persistence (raw `database/sql`, no ORM)
 - **Prometheus** — metrics collection
 - **Grafana** — metrics visualization
 - **Docker Compose** — orchestrates all services
@@ -33,8 +40,10 @@ When an order is placed:
 
 ```
 trading-platform/
-├── main.go           # Gin server, NATS connection, HTTP and WebSocket handlers
-├── hub.go            # WebSocket Hub — manages connected clients with mutex protection
+├── main.go           # Gin server, JetStream setup, HTTP and WebSocket handlers
+├── hub.go            # WebSocket Hub — mutex-protected client map, broadcast with dead connection cleanup
+├── redis.go          # Redis client init, latest price cache
+├── db.go             # Postgres connection, table creation, raw SQL queries
 ├── metrics.go        # Prometheus metrics definitions
 ├── prometheus.yml    # Prometheus scrape config
 ├── docker-compose.yml
@@ -50,7 +59,8 @@ trading-platform/
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Trading dashboard (frontend) |
-| POST | `/orders` | Place an order — publishes to NATS |
+| POST | `/orders` | Place an order — publishes to JetStream, writes to Redis and Postgres |
+| GET | `/orders` | Fetch last 50 orders from Postgres |
 | GET | `/ws` | WebSocket connection for live order feed |
 | GET | `/metrics` | Prometheus metrics endpoint |
 
@@ -75,6 +85,22 @@ Response:
 
 Validation: `quantity` must be at least 1, `price` must be greater than 0.
 
+### GET /orders
+
+Returns last 50 orders ordered by most recent:
+```json
+[
+  {
+    "id": 1,
+    "order_id": "ORD-58291",
+    "instrument": "RELIANCE",
+    "quantity": 10,
+    "price": 2450.50,
+    "created_at": "2025-01-01T10:00:00Z"
+  }
+]
+```
+
 ## Running Locally
 
 **Prerequisites:** Docker and Docker Compose installed.
@@ -82,7 +108,7 @@ Validation: `quantity` must be at least 1, `price` must be greater than 0.
 ```bash
 git clone https://github.com/DeepstuffxP/trading-platform.git
 cd trading-platform
-docker-compose up --build
+docker compose up --build
 ```
 
 Once running:
@@ -99,8 +125,6 @@ To add Prometheus as a data source in Grafana: Connections → Data sources → 
 
 ## Metrics
 
-Three metrics are exposed at `/metrics`:
-
 | Metric | Type | Description |
 |--------|------|-------------|
 | `trading_orders_total` | Counter | Total orders placed since startup |
@@ -109,10 +133,12 @@ Three metrics are exposed at `/metrics`:
 
 ## Concurrency Design
 
-Each browser connecting to `/ws` runs in its own goroutine, automatically managed by Go's `net/http` internals. The Hub maintains a `map[*websocket.Conn]bool` of all connected clients — protected by a `sync.Mutex` to prevent concurrent map writes from racing goroutines, which would panic at runtime. The NATS subscriber callback also runs in a background goroutine managed by the NATS client library.
+Each browser connecting to `/ws` runs in its own goroutine. The Hub maintains a `map[*websocket.Conn]bool` protected by a `sync.Mutex` to prevent concurrent map writes from racing goroutines. Dead connections are collected during broadcast and cleaned up after releasing the lock — avoiding a block on slow or disconnected clients. The JetStream consumer callback runs in a background goroutine managed by the NATS client library.
 
 ## Shutting Down
 
 ```bash
-docker-compose down
+docker compose down
 ```
+
+Note: Redis holds latest prices in memory only. Prices are lost on `docker compose down` and repopulated as new orders come in.
