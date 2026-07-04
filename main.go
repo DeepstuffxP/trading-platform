@@ -54,7 +54,7 @@ func main() {
 	}
 	log.Println("JetStream stream ready")
 
-	// durable consumer — survives restarts, replays unacked messages
+	// durable consumer 
 	_, err = js.Subscribe("orders.new", func(msg *nats.Msg) {
 		log.Println("received from JetStream, broadcasting:", string(msg.Data))
 		hub.broadcast(string(msg.Data))
