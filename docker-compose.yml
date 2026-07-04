@@ -5,14 +5,34 @@ services:
     ports:
       - "4222:4222"
 
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=5432
+      - POSTGRES_DB=trading
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   app:
     build: .
     ports:
       - "8080:8080"
     environment:
       - NATS_URL=nats://nats:4222
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=host=postgres user=postgres password=5432 dbname=trading port=5432 sslmode=disable
     depends_on:
       - nats
+      - redis
+      - postgres
 
   prometheus:
     image: prom/prometheus:latest
@@ -34,3 +54,4 @@ services:
 
 volumes:
   grafana_data:
+  postgres_data:

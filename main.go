@@ -26,6 +26,7 @@ type Order struct {
 func main() {
 	hub := newHub()
 
+	// nats + jetstrm
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		natsURL = nats.DefaultURL
@@ -38,15 +39,38 @@ func main() {
 	defer nc.Close()
 	log.Println("connected to NATS")
 
-	// subscribe to orders.new
-	_, err = nc.Subscribe("orders.new", func(msg *nats.Msg) {
-		log.Println("received from NATS, broadcasting:", string(msg.Data))
-		hub.broadcast(string(msg.Data))
-	})
+	js, err := nc.JetStream()
 	if err != nil {
-		log.Fatal("NATS subscribe failed:", err)
+		log.Fatal("JetStream context failed:", err)
 	}
 
+	// create stream
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "ORDERS",
+		Subjects: []string{"orders.new"},
+	})
+	if err != nil && err != nats.ErrStreamNameAlreadyInUse {
+		log.Fatal("stream creation failed:", err)
+	}
+	log.Println("JetStream stream ready")
+
+	// durable consumer — survives restarts, replays unacked messages
+	_, err = js.Subscribe("orders.new", func(msg *nats.Msg) {
+		log.Println("received from JetStream, broadcasting:", string(msg.Data))
+		hub.broadcast(string(msg.Data))
+		msg.Ack()
+	}, nats.Durable("ws-broadcaster"), nats.ManualAck())
+	if err != nil {
+		log.Fatal("JetStream subscribe failed:", err)
+	}
+
+	// Redis
+	initRedis()
+
+	// Postgres
+	initDB()
+
+	//  HTTP
 	r := gin.Default()
 
 	r.Static("/static", "./static")
@@ -69,6 +93,21 @@ func main() {
 			hub.removeClient(conn)
 			conn.Close()
 		}()
+
+		//  late - joiner
+		keys, err := rdb.Keys(ctx, "latest_price:*").Result()
+		if err == nil {
+			for _, key := range keys {
+				val, err := rdb.Get(ctx, key).Result()
+				if err == nil {
+					instrument := key[len("latest_price:"):]
+					conn.WriteMessage(websocket.TextMessage, []byte(
+						fmt.Sprintf("[LATEST] %s: ₹%s", instrument, val),
+					))
+				}
+			}
+		}
+
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				break
@@ -76,7 +115,7 @@ func main() {
 		}
 	})
 
-	// REST endpoint
+	// POST
 	r.POST("/orders", func(c *gin.Context) {
 		var order Order
 		if err := c.ShouldBindJSON(&order); err != nil {
@@ -84,20 +123,35 @@ func main() {
 			return
 		}
 
-		//id
-		uniqueID := fmt.Sprintf("ORD-%d", time.Now().Unix()%100000)
-
+		uniqueID := fmt.Sprintf("ORD-%d", time.Now().UnixNano()%100000)
 		msg := fmt.Sprintf("[%s] %s | QTY: %d | PRICE: ₹%.2f", uniqueID, order.Instrument, order.Quantity, order.Price)
 
-		if err := nc.Publish("orders.new", []byte(msg)); err != nil {
+		// publish
+		if _, err := js.Publish("orders.new", []byte(msg)); err != nil {
 			orderPublishFailures.Inc()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to publish"})
 			return
 		}
 		ordersPlaced.Inc()
 
+		// cache latest price
+		cacheLatestPrice(order.Instrument, order.Price)
+
+		//save
+		saveOrder(uniqueID, order.Instrument, order.Quantity, order.Price)
+
 		log.Printf("order published: %s", uniqueID)
 		c.JSON(http.StatusOK, gin.H{"status": "order placed", "order_id": uniqueID})
+	})
+
+	// GET
+	r.GET("/orders", func(c *gin.Context) {
+		records, err := getRecentOrders()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch orders"})
+			return
+		}
+		c.JSON(http.StatusOK, records)
 	})
 
 	log.Println("server listening on :8080")

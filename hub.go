@@ -34,11 +34,17 @@ func (h *Hub) removeClient(conn *websocket.Conn) {
 
 func (h *Hub) broadcast(msg string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+
+	var dead []*websocket.Conn
 	for conn := range h.clients {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
-			conn.Close()
-			delete(h.clients, conn)
+			dead = append(dead, conn)
 		}
 	}
+	for _, conn := range dead {
+		delete(h.clients, conn)
+		activeConnections.Dec()
+		conn.Close()
+	}
+	h.mu.Unlock()
 }
