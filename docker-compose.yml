@@ -11,7 +11,7 @@ services:
       - "6379:6379"
 
   postgres:
-    image: postgres:18-alpine
+    image: postgres:16-alpine
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=5432
@@ -20,6 +20,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   app:
     build: .
@@ -30,9 +35,12 @@ services:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=host=postgres user=postgres password=5432 dbname=trading port=5432 sslmode=disable
     depends_on:
-      - nats
-      - redis
-      - postgres
+      nats:
+        condition: service_started
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
   prometheus:
     image: prom/prometheus:latest
